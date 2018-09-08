@@ -15,11 +15,13 @@ const (
 	MsgSend MsgType = "send"
 )
 
+// Log is used in combination with the Logger method of the Expect type, to log all inbound/outbound network traffic
 type Log struct {
 	Type MsgType
 	Data string
 }
 
+// Batcher is the simple interface all batch records implement
 type Batcher interface {
 	// Invoke
 	//
@@ -27,11 +29,17 @@ type Batcher interface {
 	Invoke(ctx context.Context, exp *Expect, timeout time.Duration, batchIdx int) error
 }
 
+// BRecv allows regexps to be matched on input
 type BRecv struct {
+	//  Re is required, it's the regular expression to use for matching
+	Re *regexp.Regexp
+	// OnSuccess is optional, the first element is the entire matched pattern,
+	// the subsequent elements are submatches. Returning an error from here will
+	// stop the Batch operation and return with an error
 	OnSuccess func(matched []string) error
-	Re        *regexp.Regexp
 }
 
+// Invoke fulfils the Batcher interface
 func (b *BRecv) Invoke(ctx context.Context, exp *Expect, timeout time.Duration, batchIdx int) error {
 	defer exp.Conn.SetReadDeadline(time.Time{})
 	exp.Conn.SetReadDeadline(time.Now().Add(timeout))
@@ -75,18 +83,25 @@ func (b *BRecv) Invoke(ctx context.Context, exp *Expect, timeout time.Duration, 
 	return nil
 }
 
+// BWipeBuf flushes any cached inbound data. You probably don't want to call this.
 type BWipeBuf struct{}
 
+// Invoke fulfils the Batcher interface
 func (b *BWipeBuf) Invoke(ctx context.Context, exp *Expect, timeout time.Duration, batchIdx int) error {
 	exp.buf = nil
 	return nil
 }
 
+// BSend sends data through the net.Conn interface
 type BSend struct {
-	Data      string
+	// Data stores the string to be sent over the connection
+	Data string
+	// OnSuccess is optional, returning an error from here will
+	// stop the Batch operation and return with an error
 	OnSuccess func() error
 }
 
+// Invoke fulfils the Batcher interface
 func (b *BSend) Invoke(ctx context.Context, exp *Expect, timeout time.Duration, batchIdx int) error {
 	select {
 	case <-ctx.Done():
@@ -109,43 +124,49 @@ func (b *BSend) Invoke(ctx context.Context, exp *Expect, timeout time.Duration, 
 	return nil
 }
 
+// BSendDyn is like BSend however it determines what will be sent by calling the Data() callback
 type BSendDyn struct {
-	Data      func() string
-	OnSuccess func() error
+	Data      func() string // Data is required, the result is treated like BSend.Data
+	OnSuccess func() error  // OnSuccess is like BSend.OnSuccess, it is optional
 }
 
+// Invoke fulfils the Batcher interface
 func (b *BSendDyn) Invoke(ctx context.Context, exp *Expect, timeout time.Duration, batchIdx int) error {
 	bs := BSend{Data: b.Data(), OnSuccess: b.OnSuccess}
 	return bs.Invoke(ctx, exp, timeout, batchIdx)
 }
 
+// BCallback calls the callback, nothing more. Useful for regression testing.
 type BCallback struct {
 	Callback func()
 }
 
+// Invoke fulfils the Batcher interface
 func (b *BCallback) Invoke(ctx context.Context, exp *Expect, timeout time.Duration, batchIdx int) error {
 	b.Callback()
 	return nil
 }
 
-type Encoding string
+// type Encoding string
 
-const (
-	EncUtf8 Encoding = ""
-	EncNone Encoding = "none"
-)
+// const (
+// 	EncUtf8 Encoding = ""
+// 	EncNone Encoding = "none"
+// )
 
 type Expect struct {
-	Encoding Encoding
-	Logger   func(msg Log)
-	Conn     net.Conn
-	buf      []byte
+	//Encoding Encoding
+	Logger func(msg Log)
+	Conn   net.Conn
+	buf    []byte
 }
 
+// Batch calls Batcher with a context.Background() for context
 func (e *Expect) Batch(timeout time.Duration, batches ...Batcher) error {
 	return e.BatchContext(context.Background(), timeout, batches...)
 }
 
+// Error is the struct that all errors returned by Batch/BatchContext are wrapped in
 type Error struct {
 	BatchIdx int
 	Orig     error
@@ -156,6 +177,9 @@ func (err *Error) Error() string {
 	return fmt.Sprintf("Batch op with type %T at index %d failed: %s", err.Op, err.BatchIdx, err.Orig)
 }
 
+// BatchContext allows multiple batched requests/responses. timeout operates on a
+// per command basis, to limit the total time that can be used set a deadline on
+// the passed in context.
 func (e *Expect) BatchContext(ctx context.Context, timeout time.Duration, ops ...Batcher) error {
 	done := make(chan struct{})
 	defer close(done)

@@ -83,6 +83,73 @@ func (b *BRecv) Invoke(ctx context.Context, exp *Expect, timeout time.Duration, 
 	return nil
 }
 
+// BSwitchOption holds each possibility stored in a BSwitch
+type BSwitchOption struct {
+	//  Re is required, it's the regular expression to use for matching
+	Re *regexp.Regexp
+	// OnSuccess is optional, the first element is the entire matched pattern,
+	// the subsequent elements are submatches. Returning an error from here will
+	// stop the Batch operation and return with an error
+	OnSuccess func(matched []string) error
+	// Child contains the actions to be run if the Re matches
+	Child []Batcher
+}
+
+// BSwitch allows regexps to be matched on input, and provide different
+// execution paths depending on the matches
+type BSwitch []*BSwitchOption
+
+// Invoke fulfils the Batcher interface
+func (bs BSwitch) Invoke(ctx context.Context, exp *Expect, timeout time.Duration, batchIdx int) error {
+	defer exp.Conn.SetReadDeadline(time.Time{})
+	exp.Conn.SetReadDeadline(time.Now().Add(timeout))
+
+	var b *BSwitchOption
+	var offs []int
+OUTER:
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		for i := range bs {
+			offs = bs[i].Re.FindSubmatchIndex(exp.buf)
+			if offs != nil {
+				b = bs[i]
+				break OUTER
+			}
+		}
+
+		var buf [512]byte
+		sz, err := exp.Conn.Read(buf[:])
+		if err != nil {
+			return err
+		}
+
+		if exp.Logger != nil {
+			exp.Logger(Log{Type: MsgRecv, Data: string(buf[:sz])})
+		}
+		exp.buf = append(exp.buf, buf[:sz]...)
+	}
+
+	exp.injected = b.Child
+	if b.OnSuccess != nil {
+		amt := make([]string, len(offs)/2)
+		for i := 0; i < len(offs); i += 2 {
+			amt[i/2] = string(exp.buf[offs[i]:offs[i+1]])
+		}
+		exp.buf = exp.buf[offs[1]:]
+		return b.OnSuccess(amt)
+	}
+
+	exp.buf = exp.buf[offs[1]:]
+
+	return nil
+
+}
+
 // BWipeBuf flushes any cached inbound data. You probably don't want to call this.
 type BWipeBuf struct{}
 
@@ -156,9 +223,10 @@ func (b *BCallback) Invoke(ctx context.Context, exp *Expect, timeout time.Durati
 
 type Expect struct {
 	//Encoding Encoding
-	Logger func(msg Log)
-	Conn   net.Conn
-	buf    []byte
+	Logger   func(msg Log)
+	Conn     net.Conn
+	buf      []byte
+	injected []Batcher
 }
 
 // Batch calls Batcher with a context.Background() for context
@@ -181,23 +249,29 @@ func (err *Error) Error() string {
 // per command basis, to limit the total time that can be used set a deadline on
 // the passed in context.
 func (e *Expect) BatchContext(ctx context.Context, timeout time.Duration, ops ...Batcher) error {
-	done := make(chan struct{})
-	defer close(done)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	go func() {
-		select {
-		case <-done:
-			return
-		case <-ctx.Done():
-			e.Conn.SetDeadline(time.Now())
-		}
+		<-ctx.Done()
+		e.Conn.SetDeadline(time.Now())
 	}()
 
+	return e.batchContext(ctx, timeout, ops)
+}
+
+func (e *Expect) batchContext(ctx context.Context, timeout time.Duration, ops []Batcher) error {
+	e.injected = nil
 	for i, op := range ops {
 		if err := op.Invoke(ctx, e, timeout, i); err != nil {
 			return &Error{
 				BatchIdx: i,
 				Op:       op,
 				Orig:     err,
+			}
+		}
+		if moreOps := e.injected; moreOps != nil {
+			if err := e.batchContext(ctx, timeout, moreOps); err != nil {
+				return err
 			}
 		}
 	}

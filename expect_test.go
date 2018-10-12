@@ -17,6 +17,7 @@ var _ expect.Batcher = (*expect.BWipeBuf)(nil)
 var _ expect.Batcher = (*expect.BSend)(nil)
 var _ expect.Batcher = (*expect.BSendDyn)(nil)
 var _ expect.Batcher = (*expect.BCallback)(nil)
+var _ expect.Batcher = (*expect.BSwitch)(nil)
 
 func genConn(ctx context.Context, t *testing.T, args ...interface{}) net.Conn {
 	l, err := net.Listen("tcp4", "127.0.0.1:0")
@@ -274,5 +275,85 @@ func TestExpect_Logging(t *testing.T) {
 		if msgs[i].Data != texts[i].(string) {
 			t.Errorf("Incorrect data type")
 		}
+	}
+}
+
+func bsend(data string, success func() error) *expect.BSend {
+	return &expect.BSend{Data: data, OnSuccess: success}
+}
+func brecv(re string, success func([]string) error) *expect.BRecv {
+	return &expect.BRecv{
+		Re:        regexp.MustCompile(re),
+		OnSuccess: success,
+	}
+}
+func bswitch(opts ...*expect.BSwitchOption) expect.BSwitch {
+	return expect.BSwitch(opts)
+}
+func bswitchopt(re string, success func([]string) error, batched ...expect.Batcher) *expect.BSwitchOption {
+	return &expect.BSwitchOption{
+		Re:        regexp.MustCompile(re),
+		OnSuccess: success,
+		Child:     batched,
+	}
+}
+
+func TestExpect_Switch(t *testing.T) {
+	allArgs := []struct {
+		desc string
+		args []interface{}
+	}{
+		{"Enable with password", []interface{}{
+			"Username: ", "admin\r\n",
+			">", "enable\r\n",
+			"Password: ", "password\r\n",
+			"#", 1000,
+		}},
+		{"Enable without password", []interface{}{
+			"Username: ", "admin\r\n",
+			">", "enable\r\n",
+			"#", 1000,
+		}},
+		{"Already enabled", []interface{}{
+			"Username: ", "admin\r\n",
+			"#", 1000,
+		}},
+	}
+
+	var called bool
+	opts := []expect.Batcher{
+		brecv(`Username: `, nil),
+		bsend("admin\r\n", nil),
+		bswitch(
+			bswitchopt(`>`, nil,
+				bsend("enable\r\n", nil),
+				bswitch(
+					bswitchopt(`Password: `, nil,
+						bsend("password\r\n", nil),
+						brecv(`#`, nil)),
+					bswitchopt(`#`, nil)),
+			),
+			bswitchopt(`#`, nil)),
+		&expect.BCallback{Callback: func() { called = true }},
+	}
+
+	for _, args := range allArgs {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		t.Logf("# Subtest '%s'", args.desc)
+		called = false
+		e := &expect.Expect{
+			Conn: genConn(ctx, t, args.args...),
+			Logger: func(msg expect.Log) {
+				t.Logf("  [%s] %q\n", msg.Type, msg.Data)
+			},
+		}
+		err := e.BatchContext(ctx, 400*time.Millisecond, opts...)
+		if err != nil {
+			t.Fatal("Expect did not complete:", err)
+		}
+		if !called {
+			t.Fatal("Callback was not called")
+		}
+		cancel()
 	}
 }

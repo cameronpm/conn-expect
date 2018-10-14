@@ -85,12 +85,8 @@ func (b *BRecv) Invoke(ctx context.Context, exp *Expect, timeout time.Duration, 
 
 // BSwitchOption holds each possibility stored in a BSwitch
 type BSwitchOption struct {
-	//  Re is required, it's the regular expression to use for matching
-	Re *regexp.Regexp
-	// OnSuccess is optional, the first element is the entire matched pattern,
-	// the subsequent elements are submatches. Returning an error from here will
-	// stop the Batch operation and return with an error
-	OnSuccess func(matched []string) error
+	// BRecv
+	BRecv
 	// Child contains the actions to be run if the Re matches
 	Child []Batcher
 }

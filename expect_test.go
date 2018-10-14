@@ -292,9 +292,11 @@ func bswitch(opts ...*expect.BSwitchOption) expect.BSwitch {
 }
 func bswitchopt(re string, success func([]string) error, batched ...expect.Batcher) *expect.BSwitchOption {
 	return &expect.BSwitchOption{
-		Re:        regexp.MustCompile(re),
-		OnSuccess: success,
-		Child:     batched,
+		BRecv: expect.BRecv{
+			Re:        regexp.MustCompile(re),
+			OnSuccess: success,
+		},
+		Child: batched,
 	}
 }
 

@@ -2,6 +2,7 @@ package expect
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"regexp"
@@ -36,7 +37,8 @@ type BRecv struct {
 	// OnSuccess is optional, the first element is the entire matched pattern,
 	// the subsequent elements are submatches. Returning an error from here will
 	// stop the Batch operation and return with an error
-	OnSuccess func(matched []string) error
+	OnSuccess       func(matched []string) error
+	OnSuccessInject func(matched []string) ([]Batcher, error)
 }
 
 // Invoke fulfils the Batcher interface
@@ -69,18 +71,37 @@ func (b *BRecv) Invoke(ctx context.Context, exp *Expect, timeout time.Duration, 
 		exp.buf = append(exp.buf, buf[:sz]...)
 	}
 
+	if cbExisted, err := b.onSuccess(exp, offs); cbExisted {
+		return err
+	}
+
+	exp.buf = exp.buf[offs[1]:]
+
+	return nil
+}
+
+func (b *BRecv) onSuccess(exp *Expect, offs []int) (bool, error) {
 	if b.OnSuccess != nil {
 		amt := make([]string, len(offs)/2)
 		for i := 0; i < len(offs); i += 2 {
 			amt[i/2] = string(exp.buf[offs[i]:offs[i+1]])
 		}
 		exp.buf = exp.buf[offs[1]:]
-		return b.OnSuccess(amt)
+		return true, b.OnSuccess(amt)
+	} else if b.OnSuccessInject != nil {
+		amt := make([]string, len(offs)/2)
+		for i := 0; i < len(offs); i += 2 {
+			amt[i/2] = string(exp.buf[offs[i]:offs[i+1]])
+		}
+		exp.buf = exp.buf[offs[1]:]
+		injected, err := b.OnSuccessInject(amt)
+		if err == nil {
+			exp.injected = injected
+		}
+		return true, err
 	}
 
-	exp.buf = exp.buf[offs[1]:]
-
-	return nil
+	return false, nil
 }
 
 // BSwitchOption holds each possibility stored in a BSwitch
@@ -130,15 +151,11 @@ OUTER:
 		exp.buf = append(exp.buf, buf[:sz]...)
 	}
 
-	exp.injected = b.Child
-	if b.OnSuccess != nil {
-		amt := make([]string, len(offs)/2)
-		for i := 0; i < len(offs); i += 2 {
-			amt[i/2] = string(exp.buf[offs[i]:offs[i+1]])
-		}
-		exp.buf = exp.buf[offs[1]:]
-		return b.OnSuccess(amt)
+	if cbExisted, err := b.onSuccess(exp, offs); cbExisted {
+		exp.injected = append(exp.injected, b.Child...)
+		return err
 	}
+	exp.injected = b.Child
 
 	exp.buf = exp.buf[offs[1]:]
 
@@ -240,6 +257,10 @@ type Error struct {
 func (err *Error) Error() string {
 	return fmt.Sprintf("Batch op with type %T at index %d failed: %s", err.Op, err.BatchIdx, err.Orig)
 }
+
+// Support Is(error) and Unwrap() implicit interfaces for errors.Is/As
+func (e *Error) Is(err error) bool { return e == err || errors.Is(e.Orig, err) }
+func (e *Error) Unwrap() error     { return e.Orig }
 
 // BatchContext allows multiple batched requests/responses. timeout operates on a
 // per command basis, to limit the total time that can be used set a deadline on

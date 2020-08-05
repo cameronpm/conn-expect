@@ -163,6 +163,84 @@ func TestExpect_Dynamic(t *testing.T) {
 	}
 }
 
+func TestExpect_Dynamic_Inject(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	e := &expect.Expect{
+		Conn: genConn(ctx, t,
+			"Username: ", "admin\r\n",
+			"Dynamic One Ok", "Matched One Yay\r\n",
+			"> ", 1000),
+	}
+	var called bool
+	err := e.BatchContext(ctx, 400*time.Millisecond,
+		&expect.BRecv{Re: regexp.MustCompile(`Username: `)},
+		&expect.BSend{Data: "admin\r\n"},
+		&expect.BRecv{
+			Re: regexp.MustCompile(`Dynamic (\w+) Ok`),
+			OnSuccessInject: func(matches []string) ([]expect.Batcher, error) {
+				match := matches[1]
+				return []expect.Batcher{
+					&expect.BSend{Data: fmt.Sprintf("Matched %s Yay\r\n", match)},
+				}, nil
+			},
+		},
+		&expect.BCallback{Callback: func() { called = true }},
+		&expect.BRecv{Re: regexp.MustCompile(`> `)},
+		&expect.BWipeBuf{},
+	)
+	if err != nil {
+		t.Error("Expect did not complete:", err)
+	}
+	if !called {
+		t.Error("Callback was not called")
+	}
+}
+
+func TestExpect_Dynamic_Inject_Switcher(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	e := &expect.Expect{
+		Conn: genConn(ctx, t,
+			"Username: ", "admin\r\n",
+			"Dynamic One Ok", "Matched One Yay\r\n",
+			"> ", 1000),
+	}
+	var called bool
+	err := e.BatchContext(ctx, 400*time.Millisecond,
+		&expect.BRecv{Re: regexp.MustCompile(`Username: `)},
+		&expect.BSend{Data: "admin\r\n"},
+		&expect.BSwitch{
+			{
+				BRecv: expect.BRecv{
+					Re: regexp.MustCompile(`Dynamic (\w+) Ok`),
+					OnSuccessInject: func(matches []string) ([]expect.Batcher, error) {
+						match := matches[1]
+						return []expect.Batcher{
+							&expect.BSend{Data: fmt.Sprintf("Matched %s Yay\r\n", match)},
+						}, nil
+					},
+				},
+			},
+			{
+				BRecv: expect.BRecv{
+					Re:        regexp.MustCompile(`Dynamic WillFail Ok`),
+					OnSuccess: func(matched []string) error { return fmt.Errorf("test failure") },
+				},
+			},
+		},
+		&expect.BCallback{Callback: func() { called = true }},
+		&expect.BRecv{Re: regexp.MustCompile(`> `)},
+		&expect.BWipeBuf{},
+	)
+	if err != nil {
+		t.Error("Expect did not complete:", err)
+	}
+	if !called {
+		t.Error("Callback was not called")
+	}
+}
+
 func TestExpect_Context_Failure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2000*time.Millisecond)
 	defer cancel()
